@@ -15,6 +15,7 @@ impl From<std::io::Error> for Error {
     }
 }
 
+#[derive(Debug)]
 pub struct Player {
     name: String,
     availability: Vec<bool>,
@@ -22,7 +23,7 @@ pub struct Player {
 
 impl Player {
     /// Parse a player definition such as
-    /// 
+    ///
     /// John Doe   | __XX__XX_X_XX___
     pub fn parse(line: &str) -> Option<Self> {
         let mut parts = line.splitn(2, '|');
@@ -51,6 +52,7 @@ impl Player {
     }
 }
 
+#[derive(Debug)]
 pub struct PlanningData {
     players: Vec<Player>,
     match_count: usize,
@@ -74,7 +76,7 @@ impl PlanningData {
 
             let same_count = previous_match_count.map(|count| count == current_match_count).unwrap_or(true);
             previous_match_count = Some(current_match_count);
-            
+
             if ! same_count {
                 return Err(Error::InvalidLine(index));
             }
