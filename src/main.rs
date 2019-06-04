@@ -22,7 +22,7 @@ fn main() -> input::Result<()> {
 
     let rng = rand::thread_rng();
 
-    let mut planner = Planner::new(rng, 100, input);
+    let mut planner = Planner::new(rng, 10000, input);
 
     eprintln!("Initial quality: {:?}", planner.best().fitness());
 
@@ -100,8 +100,10 @@ impl<R: rand::Rng> Planner<R> {
             })
             .collect();
 
-        // flatten tuples
-        for (child1, child2) in offspring {
+        // flatten tuples and mutate offspring
+        for (mut child1, mut child2) in offspring {
+            self.mutate(&mut child1);
+            self.mutate(&mut child2);
             self.population.push(self.make_individual(child1));
             self.population.push(self.make_individual(child2));
         }
@@ -145,6 +147,29 @@ impl<R: rand::Rng> Planner<R> {
         (child1, child2)
     }
 
+    fn mutate(&mut self, assignment: &mut Assignment) {
+        let match_count = assignment.match_parings.len();
+
+        // Approximate exponential distribution of number of mutations
+        let mut num_mutations = 0;
+        while num_mutations < match_count && self.rng.gen() {
+            num_mutations += 1;
+        }
+
+        // Apply mutations
+        let mutation_indexes = rand::seq::index::sample(&mut self.rng, match_count, num_mutations);
+        for mut_idx in mutation_indexes.into_iter() {
+            let pairing = &mut assignment.match_parings[mut_idx];
+            let player1 = if self.rng.gen() { pairing.left } else { pairing.left };
+
+            let mut player2 = self.rng.gen_range(0, self.planning.players().len() - 1);
+            if player2 >= player1.0 {
+                player2 += 1
+            };
+            *pairing = MatchPair::new(player1, PlayerId(player2));
+        }
+    }
+
     /// Judge the quality of an assignment.
     /// A good assignment should fulfil the following criteria
     ///
@@ -154,13 +179,10 @@ impl<R: rand::Rng> Planner<R> {
     /// 4. a player should never be assigned to a date where they cannot play
     fn fitness(planning: &PlanningData, assignment: &Assignment) -> ga::Fitness {
         let player_count = planning.players().len();
+        let match_count = assignment.match_parings.len();
 
         // 1. equal number of plays
         let mut counts: Vec<usize> = vec![0; player_count];
-
-        // 2. equidistant matches
-        let mut last_match: Vec<Option<usize>> = vec![None; player_count];
-        let mut min_max_match_distance: Vec<MinMaxStat<usize>> = vec![MinMaxStat::new(); player_count];
 
         // 3. variety of opponents
         let mut variety_matrix = vec![false; player_count * player_count];
@@ -168,8 +190,7 @@ impl<R: rand::Rng> Planner<R> {
         let matrix_index_flip = |pair: &MatchPair| player_count * pair.right.0 + pair.left.0;
 
         // 4. availability
-        let mut unavailability_score = 0;
-
+        let mut unavailability_penalty = 0;
 
         for (day, pair) in assignment.match_parings.iter().enumerate() {
             counts[pair.left.0] += 1;
@@ -179,23 +200,37 @@ impl<R: rand::Rng> Planner<R> {
             variety_matrix[matrix_index_flip(pair)] = true;
 
             if ! planning.players()[pair.left.0].availability()[day] {
-                unavailability_score += 1;
+                unavailability_penalty += 1;
             }
             if ! planning.players()[pair.right.0].availability()[day] {
-                unavailability_score += 1;
-            }
-
-            if let Some(last_day) = last_match[pair.left.0].replace(day) {
-                min_max_match_distance[pair.left.0].observe(day - last_day);
-            }
-            if let Some(last_day) = last_match[pair.right.0].replace(day) {
-                min_max_match_distance[pair.right.0].observe(day - last_day);
+                unavailability_penalty += 1;
             }
         }
 
-        let played_at_least_once_score = counts.iter().filter(|cnt| **cnt > 0).count();
+        let mut match_distances: Vec<f64> = Vec::new();
+        for player_num in 0..player_count {
+            let player = PlayerId(player_num);
+            let mut last_match = 0;
+            for (day, pair) in assignment.match_parings.iter().enumerate() {
+                if pair.involves(player) {
+                    match_distances.push((day - last_match + 1) as f64);
+                    last_match = day + 1;
+                }
+            }
+            match_distances.push((match_count - last_match + 2) as f64);
+        }
 
-        let inequality_score = match counts.into_iter().minmax() {
+        // 2. equidistant matches
+        let distance_count = match_distances.iter().count() as f64;
+        let average_time = match_distances.iter().sum::<f64>() / distance_count;
+        let equidistance_penalty = match_distances.iter()
+            .map(|dist| dist - average_time)
+            .map(|deviation| deviation * deviation)
+            .sum::<f64>();
+
+        // let played_at_least_once_score = counts.iter().filter(|cnt| **cnt > 0).count();
+
+        let inequality_penalty = match counts.into_iter().minmax() {
             MinMaxResult::MinMax(min, max) => max - min,
             _ => 0,
         };
@@ -203,19 +238,17 @@ impl<R: rand::Rng> Planner<R> {
         let variety_score = variety_matrix.into_iter()
             .filter(|played| *played).count();
 
-        let equidistance_score: usize = min_max_match_distance.iter()
-            .map(|stat| stat.min.and_then(|min| stat.max.map(|max| max - min)))
-            .flatten()
-            .sum();
-
-        // TODO: equidistant matches
+        // let equidistance_score: usize = min_max_match_distance.iter()
+        //     .map(|stat| stat.min.and_then(|min| stat.max.map(|max| max - min)))
+        //     .flatten()
+        //     .sum();
 
         let weighted_score =
-            inequality_score           as f64 * -4.0 +
-            played_at_least_once_score as f64 *  2.0 +
-            unavailability_score       as f64 * -5.0 +
-            equidistance_score         as f64 * -0.5 +
-            variety_score              as f64 *  1.0;
+            inequality_penalty         as f64 * -6.0 +
+            // played_at_least_once_score as f64 *  2.0 +
+            unavailability_penalty     as f64 * -10.0 +
+            equidistance_penalty              * -1.0 +
+            variety_score              as f64 *  3.0;
 
         ga::Fitness::new(weighted_score)
     }
@@ -279,26 +312,8 @@ impl MatchPair {
         }
         MatchPair::new(PlayerId(player1), PlayerId(player2))
     }
-}
 
-
-#[derive(Clone, Copy, Debug)]
-struct MinMaxStat<T> {
-    min: Option<T>,
-    max: Option<T>,
-}
-
-impl<T: Ord + Copy> MinMaxStat<T> {
-    fn new() -> Self {
-        MinMaxStat { min: None, max: None }
-    }
-
-    fn observe(&mut self, value: T) {
-        if self.min.map_or(true, |the_min| value < the_min) {
-            self.min = Some(value)
-        }
-        if self.max.map_or(true, |the_max| value > the_max) {
-            self.max = Some(value)
-        }
+    pub fn involves(&self, player: PlayerId) -> bool {
+        self.left == player || self.right == player
     }
 }
