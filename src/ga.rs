@@ -6,6 +6,10 @@ impl Fitness {
         assert!(! fitness.is_nan(), "fitness must not be Nan");
         Fitness(fitness)
     }
+
+    pub fn raw(&self) -> f64 {
+        self.0
+    }
 }
 
 impl Ord for Fitness {

@@ -22,15 +22,30 @@ fn main() -> input::Result<()> {
 
     let rng = rand::thread_rng();
 
-    let mut planner = Planner::new(rng, 10000, input);
+    let population_size = 100_000;
 
-    eprintln!("Initial quality: {:?}", planner.best().fitness());
+    let mut planner = Planner::new(rng, population_size, input);
+
+    eprintln!("Beginning evolutionary optimization");
+    eprintln!("Population size: {}", population_size);
+
+    eprintln!("Generation | Average quality | Best quality");
+
+    let print_stats = |planner: &Planner<_>| {
+        let fitness_sum = planner.population().iter().map(|ind| ind.fitness().raw()).sum::<f64>();
+        let count = planner.population().len();
+        eprintln!("{: >10} | {: >15.3} | {: >10.3}", planner.generation(), fitness_sum / count as f64, planner.best().fitness().raw());
+    };
+
+    print_stats(&planner);
 
     while planner.improve() {
-        eprintln!("Generation quality: {:?}", planner.best().fitness());
+        print_stats(&planner);
     }
 
-    eprintln!("Final quality: {:?}", planner.best().fitness());
+    print_stats(&planner);
+
+    eprintln!("Population converged on a solution");
 
     // Header
     println!("{}", planner.planning.players().iter().map(|p| p.name()).join(";"));
@@ -125,6 +140,14 @@ impl<R: rand::Rng> Planner<R> {
             .expect("population is at least 1")
     }
 
+    pub fn generation(&self) -> usize {
+        self.generation
+    }
+
+    pub fn population(&self) -> &[ga::Individual<Assignment>] {
+        self.population.as_slice()
+    }
+
     fn make_individual(&self, assignment: Assignment) -> ga::Individual<Assignment> {
         let fitness = Self::fitness(&self.planning, &assignment);
         ga::Individual::new(self.generation, assignment, fitness)
@@ -151,22 +174,32 @@ impl<R: rand::Rng> Planner<R> {
         let match_count = assignment.match_parings.len();
 
         // Approximate exponential distribution of number of mutations
-        let mut num_mutations = 0;
-        while num_mutations < match_count && self.rng.gen() {
+        let mut num_mutations = 1;
+        while num_mutations < match_count && self.rng.gen_bool(0.3) {
             num_mutations += 1;
         }
 
-        // Apply mutations
-        let mutation_indexes = rand::seq::index::sample(&mut self.rng, match_count, num_mutations);
-        for mut_idx in mutation_indexes.into_iter() {
-            let pairing = &mut assignment.match_parings[mut_idx];
-            let player1 = if self.rng.gen() { pairing.left } else { pairing.left };
 
-            let mut player2 = self.rng.gen_range(0, self.planning.players().len() - 1);
-            if player2 >= player1.0 {
-                player2 += 1
-            };
-            *pairing = MatchPair::new(player1, PlayerId(player2));
+        if self.rng.gen_bool(0.2) {
+            // In 10% of cases switch out one player at random per mutation
+            let mutation_indexes = rand::seq::index::sample(&mut self.rng, match_count, num_mutations);
+            for mut_idx in mutation_indexes.into_iter() {
+                let pairing = &mut assignment.match_parings[mut_idx];
+                let player1 = if self.rng.gen() { pairing.left } else { pairing.left };
+
+                let mut player2 = self.rng.gen_range(0, self.planning.players().len() - 1);
+                if player2 >= player1.0 {
+                    player2 += 1
+                };
+                *pairing = MatchPair::new(player1, PlayerId(player2));
+            }
+        } else {
+            // In the remaining 90% of cases, swap the given number of pairs.
+            for _ in 0..num_mutations {
+                let i = self.rng.gen_range(0, match_count);
+                let j = self.rng.gen_range(0, match_count);
+                self.population.swap(i, j);
+            }
         }
     }
 
@@ -228,8 +261,6 @@ impl<R: rand::Rng> Planner<R> {
             .map(|deviation| deviation * deviation)
             .sum::<f64>();
 
-        // let played_at_least_once_score = counts.iter().filter(|cnt| **cnt > 0).count();
-
         let inequality_penalty = match counts.into_iter().minmax() {
             MinMaxResult::MinMax(min, max) => max - min,
             _ => 0,
@@ -238,14 +269,8 @@ impl<R: rand::Rng> Planner<R> {
         let variety_score = variety_matrix.into_iter()
             .filter(|played| *played).count();
 
-        // let equidistance_score: usize = min_max_match_distance.iter()
-        //     .map(|stat| stat.min.and_then(|min| stat.max.map(|max| max - min)))
-        //     .flatten()
-        //     .sum();
-
         let weighted_score =
             inequality_penalty         as f64 * -6.0 +
-            // played_at_least_once_score as f64 *  2.0 +
             unavailability_penalty     as f64 * -10.0 +
             equidistance_penalty              * -1.0 +
             variety_score              as f64 *  3.0;
@@ -272,18 +297,8 @@ impl Assignment {
     }
 }
 
-// struct Constraints {
-//     pub num_players: usize,
-//     pub num_days: usize,
-//     pub blocked_days: usize,
-//     pub count_bias: Vec<usize>,
-// }
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PlayerId(usize);
-
-// #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-// pub struct Day(usize);
 
 #[derive(Debug, Clone)]
 pub struct MatchPair {
