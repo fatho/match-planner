@@ -1,12 +1,15 @@
+use std::fmt;
 use std::io::{BufReader, BufRead, Read};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The various kinds of errors that can happen while reading input.
 #[derive(Debug)]
 pub enum Error {
+    /// An I/O error (such as not being able to read the input file)
     Io(std::io::Error),
+    /// The input file contained an invalid line identified by the given line number.
     InvalidLine(usize),
-    InvalidCall,
 }
 
 impl From<std::io::Error> for Error {
@@ -15,16 +18,43 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::Io(err) => err.fmt(f),
+            Error::InvalidLine(line_num) =>
+                write!(f, "Line number {} is malformed", line_num)
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(err) => Some(err),
+            Error::InvalidLine(_) => None,
+        }
+    }
+}
+
+
+/// A player participating in matches.
 #[derive(Debug)]
 pub struct Player {
+    /// The name of the player, used in the output file.
     name: String,
+    /// The availability of a player given consecutively for all match dates.
+    /// If true, the player is available, otherwise, the player is unavailable
+    /// and cannot play.
     availability: Vec<bool>,
 }
 
 impl Player {
     /// Parse a player definition such as
     ///
+    /// ```text
     /// John Doe   | __XX__XX_X_XX___
+    /// ```
     pub fn parse(line: &str) -> Option<Self> {
         let mut parts = line.splitn(2, '|');
         let name = parts.next()?.trim();
@@ -52,6 +82,9 @@ impl Player {
     }
 }
 
+/// The input to the planning algorithm. Defines which players partake in the matches,
+/// and how many matches there are. The number of matches must be equal to the length
+/// of the availability vectors of all players.
 #[derive(Debug)]
 pub struct PlanningData {
     players: Vec<Player>,
@@ -59,6 +92,7 @@ pub struct PlanningData {
 }
 
 impl PlanningData {
+    /// Read the planning data from an input stream.
     pub fn load<In: Read>(stream: In) -> Result<Self> {
         let mut players = Vec::new();
 

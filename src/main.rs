@@ -1,18 +1,42 @@
 use std::fs::File;
-use std::path::Path;
+use std::path::PathBuf;
+use std::io::Write;
 use rand::seq::SliceRandom;
 use itertools::{Itertools, MinMaxResult};
+use structopt::StructOpt;
 
+// submodules
 mod input;
 mod ga;
-use input::PlanningData;
+use input::{PlanningData, Player};
+
+
+/// The command line options that can be given to this application.
+#[derive(Debug, StructOpt)]
+#[structopt(name = "match-lanner", about = "An evolutionary planning application for assigning players to matches.")]
+struct Opt {
+    /// Population size used for the evolutionary algorithm.
+    #[structopt(short = "p", long = "population", default_value = "100000")]
+    population_size: usize,
+
+    /// Input file, stdin if not present
+    #[structopt(short = "i", long = "input", parse(from_os_str))]
+    input: Option<PathBuf>,
+
+    /// Output file, stdout if not present
+    #[structopt(short = "o", long = "output", parse(from_os_str))]
+    output: Option<PathBuf>,
+}
+
 
 fn main() -> input::Result<()> {
-    let input = match std::env::args().skip(1).next() {
+    let opt = Opt::from_args();
+    println!("{:?}", opt);
+
+    let input = match opt.input {
         None => PlanningData::load(std::io::stdin())?,
         Some(file_name) => {
-            let path = Path::new::<str>(file_name.as_ref());
-            let file = File::open(path)?;
+            let file = File::open(&file_name)?;
             PlanningData::load(file)?
         },
     };
@@ -22,12 +46,10 @@ fn main() -> input::Result<()> {
 
     let rng = rand::thread_rng();
 
-    let population_size = 100_000;
-
-    let mut planner = Planner::new(rng, population_size, input);
+    let mut planner = Planner::new(rng, opt.population_size, input);
 
     eprintln!("Beginning evolutionary optimization");
-    eprintln!("Population size: {}", population_size);
+    eprintln!("Population size: {}", opt.population_size);
 
     eprintln!("Generation | Average quality | Best quality");
 
@@ -47,18 +69,31 @@ fn main() -> input::Result<()> {
 
     eprintln!("Population converged on a solution");
 
-    // Header
-    println!("{}", planner.planning.players().iter().map(|p| p.name()).join(";"));
-    // Match rows
-    for pair in planner.best().genome().match_parings.iter() {
-        let row = planner.planning.players().iter().enumerate()
-            .map(|(index, _)| if pair.left.0 == index || pair.right.0 == index { "1" } else { "" })
-            .join(";");
-        println!("{}", row);
+    match opt.output {
+        None => print_solution(std::io::stdout(), planner.planning.players(), planner.best().genome())?,
+        Some(file_name) => {
+            let file = File::create(&file_name)?;
+            print_solution(file, planner.planning.players(), planner.best().genome())?;
+        },
     }
 
     Ok(())
 }
+
+fn print_solution<W: Write>(mut out: W, players: &[Player], assignment: &Assignment) -> input::Result<()> {
+    // Header
+    writeln!(out, "{}", players.iter().map(|p| p.name()).join(";"))?;
+    // Rows
+    for pair in assignment.match_parings.iter() {
+        // For each column, print a "1" if the corresponding player was part of that match, and nothing otherwise.
+        let row = players.iter().enumerate()
+            .map(|(index, _)| if pair.left.0 == index || pair.right.0 == index { "1" } else { "" })
+            .join(";");
+        writeln!(out, "{}", row)?;
+    }
+    Ok(())
+}
+
 
 #[derive(Debug)]
 pub struct Planner<R> {
