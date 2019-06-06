@@ -6,17 +6,17 @@ use itertools::{Itertools, MinMaxResult};
 use structopt::StructOpt;
 
 // submodules
+mod errors;
 mod input;
 mod ga;
 use input::{PlanningData, Player};
-
 
 /// The command line options that can be given to this application.
 #[derive(Debug, StructOpt)]
 #[structopt(name = "match-lanner", about = "An evolutionary planning application for assigning players to matches.")]
 struct Opt {
     /// Population size used for the evolutionary algorithm.
-    #[structopt(short = "p", long = "population", default_value = "100000")]
+    #[structopt(short = "n", long = "population", default_value = "100000")]
     population_size: usize,
 
     /// Input file, stdin if not present
@@ -26,12 +26,43 @@ struct Opt {
     /// Output file, stdout if not present
     #[structopt(short = "o", long = "output", parse(from_os_str))]
     output: Option<PathBuf>,
+
+    /// Previous plannings that should be continued
+    #[structopt(short = "p", long = "previous", parse(from_os_str))]
+    previous: Vec<PathBuf>,
+
+    /// Quiet mode, do not print anything to stderr
+    #[structopt(short = "q", long = "quiet")]
+    quiet: bool,
 }
 
+/// Implements Write but doesn't write anything.
+struct NullWrite;
 
-fn main() -> input::Result<()> {
+impl Write for NullWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn main() -> ! {
+    match run() {
+        Err(err) => {
+            eprintln!("{}", err);
+            std::process::exit(1)
+        },
+        Ok(_) => {
+            std::process::exit(0)
+        }
+    }
+}
+
+fn run() -> errors::Result<()> {
     let opt = Opt::from_args();
-    println!("{:?}", opt);
 
     let input = match opt.input {
         None => PlanningData::load(std::io::stdin())?,
@@ -41,22 +72,29 @@ fn main() -> input::Result<()> {
         },
     };
 
-    eprintln!("Number of players: {}", input.players().len());
-    eprintln!("Number of matches: {}", input.match_count());
+    let mut log_out: Box<dyn Write> = if opt.quiet {
+        Box::new(NullWrite)
+    } else {
+        Box::new(std::io::stderr())
+    };
+
+    writeln!(log_out, "Number of players: {}", input.players().len())?;
+    writeln!(log_out, "Number of matches: {}", input.match_count())?;
 
     let rng = rand::thread_rng();
 
     let mut planner = Planner::new(rng, opt.population_size, input);
 
-    eprintln!("Beginning evolutionary optimization");
-    eprintln!("Population size: {}", opt.population_size);
+    writeln!(log_out, "Beginning evolutionary optimization")?;
+    writeln!(log_out, "Population size: {}", opt.population_size)?;
 
-    eprintln!("Generation | Average quality | Best quality");
+    writeln!(log_out, "Generation | Average quality | Best quality")?;
 
-    let print_stats = |planner: &Planner<_>| {
+    let mut print_stats = |planner: &Planner<_>| {
         let fitness_sum = planner.population().iter().map(|ind| ind.fitness().raw()).sum::<f64>();
         let count = planner.population().len();
-        eprintln!("{: >10} | {: >15.3} | {: >10.3}", planner.generation(), fitness_sum / count as f64, planner.best().fitness().raw());
+
+        writeln!(log_out, "{: >10} | {: >15.3} | {: >10.3}", planner.generation(), fitness_sum / count as f64, planner.best().fitness().raw()).unwrap();
     };
 
     print_stats(&planner);
@@ -67,7 +105,7 @@ fn main() -> input::Result<()> {
 
     print_stats(&planner);
 
-    eprintln!("Population converged on a solution");
+    writeln!(log_out, "Population converged on a solution")?;
 
     match opt.output {
         None => print_solution(std::io::stdout(), planner.planning.players(), planner.best().genome())?,
@@ -80,16 +118,19 @@ fn main() -> input::Result<()> {
     Ok(())
 }
 
-fn print_solution<W: Write>(mut out: W, players: &[Player], assignment: &Assignment) -> input::Result<()> {
-    // Header
-    writeln!(out, "{}", players.iter().map(|p| p.name()).join(";"))?;
-    // Rows
+fn print_solution<W: Write>(out: W, players: &[Player], assignment: &Assignment) -> errors::Result<()> {
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .from_writer(out);
+
+    // Header, consists of the player names
+    writer.write_record(players.iter().map(|p| p.name()))?;
+
+    // Rows, one for each match day. Contains a 1 in the columns of the two players playing on that day.
     for pair in assignment.match_parings.iter() {
-        // For each column, print a "1" if the corresponding player was part of that match, and nothing otherwise.
-        let row = players.iter().enumerate()
+        writer.write_record(players.iter().enumerate()
             .map(|(index, _)| if pair.left.0 == index || pair.right.0 == index { "1" } else { "" })
-            .join(";");
-        writeln!(out, "{}", row)?;
+        )?;
     }
     Ok(())
 }
@@ -249,15 +290,15 @@ impl<R: rand::Rng> Planner<R> {
         let player_count = planning.players().len();
         let match_count = assignment.match_parings.len();
 
-        // 1. equal number of plays
+        // equal number of plays
         let mut counts: Vec<usize> = vec![0; player_count];
 
-        // 3. variety of opponents
+        // variety of opponents
         let mut variety_matrix = vec![false; player_count * player_count];
         let matrix_index = |pair: &MatchPair| player_count * pair.left.0 + pair.right.0;
         let matrix_index_flip = |pair: &MatchPair| player_count * pair.right.0 + pair.left.0;
 
-        // 4. availability
+        // availability
         let mut unavailability_penalty = 0;
 
         for (day, pair) in assignment.match_parings.iter().enumerate() {
@@ -275,6 +316,10 @@ impl<R: rand::Rng> Planner<R> {
             }
         }
 
+        let variety_score = variety_matrix.into_iter()
+            .filter(|played| *played).count();
+
+        // equidistant matches
         let mut match_distances: Vec<f64> = Vec::new();
         for player_num in 0..player_count {
             let player = PlayerId(player_num);
@@ -288,7 +333,6 @@ impl<R: rand::Rng> Planner<R> {
             match_distances.push((match_count - last_match + 2) as f64);
         }
 
-        // 2. equidistant matches
         let distance_count = match_distances.iter().count() as f64;
         let average_time = match_distances.iter().sum::<f64>() / distance_count;
         let equidistance_penalty = match_distances.iter()
@@ -300,9 +344,6 @@ impl<R: rand::Rng> Planner<R> {
             MinMaxResult::MinMax(min, max) => max - min,
             _ => 0,
         };
-
-        let variety_score = variety_matrix.into_iter()
-            .filter(|played| *played).count();
 
         let weighted_score =
             inequality_penalty         as f64 * -6.0 +

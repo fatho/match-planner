@@ -1,7 +1,0 @@
-Person A |_XX____X___X______
-Person B     |___________XX_____
-Person C       |_XXX____X__XXX__X_
-Person D       |___XXX__XXXX__X_X_
-Person E    |____X______XXX____
-Person G|_X__X___X___X_____
-Person H     |_____XX_X______X__

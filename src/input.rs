@@ -1,42 +1,6 @@
-use std::fmt;
-use std::io::{BufReader, BufRead, Read};
+use std::io::Read;
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-/// The various kinds of errors that can happen while reading input.
-#[derive(Debug)]
-pub enum Error {
-    /// An I/O error (such as not being able to read the input file)
-    Io(std::io::Error),
-    /// The input file contained an invalid line identified by the given line number.
-    InvalidLine(usize),
-}
-
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Error {
-        Error::Io(err)
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Error::Io(err) => err.fmt(f),
-            Error::InvalidLine(line_num) =>
-                write!(f, "Line number {} is malformed", line_num)
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io(err) => Some(err),
-            Error::InvalidLine(_) => None,
-        }
-    }
-}
-
+use crate::errors::Result;
 
 /// A player participating in matches.
 #[derive(Debug)]
@@ -50,29 +14,6 @@ pub struct Player {
 }
 
 impl Player {
-    /// Parse a player definition such as
-    ///
-    /// ```text
-    /// John Doe   | __XX__XX_X_XX___
-    /// ```
-    pub fn parse(line: &str) -> Option<Self> {
-        let mut parts = line.splitn(2, '|');
-        let name = parts.next()?.trim();
-        parts.next()?
-            .trim()
-            .chars()
-            .map(|ch| match ch {
-                '_' => Some(true),
-                'X' => Some(false),
-                _ => None,
-            })
-            .collect::<Option<_>>()
-            .map(|availability| Player {
-                name: name.to_owned(),
-                availability: availability,
-            })
-    }
-
     pub fn name(&self) -> &str {
         self.name.as_ref()
     }
@@ -94,32 +35,35 @@ pub struct PlanningData {
 impl PlanningData {
     /// Read the planning data from an input stream.
     pub fn load<In: Read>(stream: In) -> Result<Self> {
-        let mut players = Vec::new();
+        let mut reader = csv::ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(true)
+            .trim(csv::Trim::All)
+            .from_reader(stream);
 
-        let mut previous_match_count: Option<usize> = None;
+        // Each column corresponds to a player, the column header is the players name.
+        let mut players: Vec<_> = reader.headers()?.iter()
+            .map(|name| Player {
+                name: name.to_owned(),
+                availability: Vec::new(),
+            })
+            .collect();
 
-        let reader = BufReader::new(stream);
-        for (index, line_or_err) in reader.lines().enumerate() {
-            let line: String = line_or_err?;
-            if line.is_empty() || line.starts_with('#') {
-                continue;
+        let mut match_count: usize = 0;
+
+        // Each row corresponds to a match day, the column values indicates whether a
+        // player is available or not.
+        for record in reader.into_records() {
+            for (player, availability) in players.iter_mut().zip(record?.iter()) {
+                // Player is available if there's no X in the column
+                player.availability.push(!(availability == "x" || availability == "X"));
             }
-
-            let row = Player::parse(line.as_ref()).ok_or_else(|| Error::InvalidLine(index))?;
-            let current_match_count = row.availability.len();
-
-            let same_count = previous_match_count.map(|count| count == current_match_count).unwrap_or(true);
-            previous_match_count = Some(current_match_count);
-
-            if ! same_count {
-                return Err(Error::InvalidLine(index));
-            }
-
-            players.push(row);
+            match_count += 1;
         }
+
         Ok(PlanningData {
             players: players,
-            match_count: previous_match_count.unwrap_or(0),
+            match_count: match_count,
         })
     }
 
