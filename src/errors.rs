@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -9,6 +10,16 @@ pub enum Error {
     Io(std::io::Error),
     /// An error while reading or writing CSV.
     Csv(csv::Error),
+    /// The timetable file is not valid.
+    InvalidTimetable { file: PathBuf, line: usize, error: TimetableError },
+}
+
+#[derive(Debug)]
+pub enum TimetableError {
+    /// There are unknown and/or missing players in the previous timetable.
+    PlayerMismatch,
+    /// There are too many or too few players assigned on a match.
+    InvalidPlayerCount,
 }
 
 impl From<std::io::Error> for Error {
@@ -28,6 +39,8 @@ impl fmt::Display for Error {
         match self {
             Error::Io(err) => err.fmt(f),
             Error::Csv(err) => err.fmt(f),
+            Error::InvalidTimetable { file, line, error } =>
+                write!(f, "{}:{}: {}", file.to_string_lossy(), line, error),
         }
     }
 }
@@ -35,8 +48,27 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Io(err) => Some(err),
-            Error::Csv(err) => Some(err),
+            Error::Io(error) => Some(error),
+            Error::Csv(error) => Some(error),
+            Error::InvalidTimetable {error, ..} => Some(error),
         }
+    }
+}
+
+
+impl fmt::Display for TimetableError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TimetableError::PlayerMismatch =>
+                write!(f, "Players in time table do not match with players in planning data"),
+            TimetableError::InvalidPlayerCount =>
+                write!(f, "Match doesn't have exactly two players"),
+        }
+    }
+}
+
+impl std::error::Error for TimetableError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
     }
 }

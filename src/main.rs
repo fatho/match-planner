@@ -2,7 +2,6 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::io::Write;
 use rand::seq::SliceRandom;
-use itertools::{Itertools, MinMaxResult};
 use structopt::StructOpt;
 
 // submodules
@@ -28,8 +27,8 @@ struct Opt {
     output: Option<PathBuf>,
 
     /// Previous plannings that should be continued
-    #[structopt(short = "p", long = "previous", parse(from_os_str))]
-    previous: Vec<PathBuf>,
+    #[structopt(short = "p", long = "past", parse(from_os_str))]
+    past: Vec<PathBuf>,
 
     /// Quiet mode, do not print anything to stderr
     #[structopt(short = "q", long = "quiet")]
@@ -78,12 +77,50 @@ fn run() -> errors::Result<()> {
         Box::new(std::io::stderr())
     };
 
+    let mut past_matches = Vec::<MatchPair>::new();
+
+    for previuos_file in opt.past.iter() {
+        let mut reader = csv::ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(true)
+            .trim(csv::Trim::All)
+            .from_path(previuos_file)?;
+
+        // Headers must match
+        if ! reader.headers()?.iter().eq(input.players().iter().map(Player::name)) {
+            return Err(errors::Error::InvalidTimetable {
+                file: previuos_file.clone(),
+                line: 1,
+                error: errors::TimetableError::PlayerMismatch
+            });
+        }
+
+        for (record_num, record) in reader.into_records().enumerate() {
+            // find the ones in the row
+            let ones = record?.iter().enumerate()
+                .filter(|(_, column)| *column == "1")
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            
+            if ones.len() != 2 {
+                return Err(errors::Error::InvalidTimetable {
+                    file: previuos_file.clone(),
+                    line: record_num + 2,
+                    error: errors::TimetableError::InvalidPlayerCount
+                });
+            }
+
+            past_matches.push(MatchPair::new(PlayerId(ones[0]), PlayerId(ones[1])));
+        }
+    }
+
+    writeln!(log_out, "Number of past matches: {}\n", past_matches.len())?;
     writeln!(log_out, "Number of players: {}", input.players().len())?;
     writeln!(log_out, "Number of matches: {}", input.match_count())?;
 
     let rng = rand::thread_rng();
 
-    let mut planner = Planner::new(rng, opt.population_size, input);
+    let mut planner = Planner::new(rng, opt.population_size, input, past_matches);
 
     writeln!(log_out, "Beginning evolutionary optimization")?;
     writeln!(log_out, "Population size: {}", opt.population_size)?;
@@ -140,20 +177,23 @@ fn print_solution<W: Write>(out: W, players: &[Player], assignment: &Assignment)
 pub struct Planner<R> {
     rng: R,
     planning: PlanningData,
+    past_matches: Vec<MatchPair>,
     population_size: usize,
     population: Vec<ga::Individual<Assignment>>,
     generation: usize,
 }
 
 impl<R: rand::Rng> Planner<R> {
-    pub fn new(mut rng: R, population_size: usize, planning: PlanningData) -> Self {
+    pub fn new(
+        mut rng: R, population_size: usize, planning: PlanningData, past_matches: Vec<MatchPair>
+    ) -> Self {
         assert!(population_size > 0);
 
         let match_count = planning.match_count();
         let player_count = planning.players().len();
         let initial_population: Vec<_> = std::iter::repeat_with(|| {
                 let assignment = Assignment::random(&mut rng, match_count, player_count);
-                let fitness = Self::fitness(&planning, &assignment);
+                let fitness = Self::fitness(&planning, past_matches.as_slice(), &assignment);
                 ga::Individual::new(0, assignment, fitness)
             })
             .take(population_size)
@@ -162,6 +202,7 @@ impl<R: rand::Rng> Planner<R> {
         Planner {
             rng: rng,
             planning: planning,
+            past_matches: past_matches,
             population_size: population_size,
             population: initial_population,
             generation: 0,
@@ -225,7 +266,7 @@ impl<R: rand::Rng> Planner<R> {
     }
 
     fn make_individual(&self, assignment: Assignment) -> ga::Individual<Assignment> {
-        let fitness = Self::fitness(&self.planning, &assignment);
+        let fitness = Self::fitness(&self.planning, self.past_matches.as_slice(), &assignment);
         ga::Individual::new(self.generation, assignment, fitness)
     }
 
@@ -258,6 +299,9 @@ impl<R: rand::Rng> Planner<R> {
 
         if self.rng.gen_bool(0.2) {
             // In 10% of cases switch out one player at random per mutation
+            // This mutation is more destructive than the other, but it allows
+            // us to generate completely new pairs, and therefore the only way
+            // of improving the variety.
             let mutation_indexes = rand::seq::index::sample(&mut self.rng, match_count, num_mutations);
             for mut_idx in mutation_indexes.into_iter() {
                 let pairing = &mut assignment.match_parings[mut_idx];
@@ -270,7 +314,10 @@ impl<R: rand::Rng> Planner<R> {
                 *pairing = MatchPair::new(player1, PlayerId(player2));
             }
         } else {
-            // In the remaining 90% of cases, swap the given number of pairs.
+            // In the remaining 90% of cases, swap pairs instead.
+            // The advantage of this mutation is that is preserves most of
+            // fitness coponents. It only affects the availability scores
+            // and equidistance scores.
             for _ in 0..num_mutations {
                 let i = self.rng.gen_range(0, match_count);
                 let j = self.rng.gen_range(0, match_count);
@@ -286,9 +333,12 @@ impl<R: rand::Rng> Planner<R> {
     /// 2. all players should have roughly the same distance between their matches
     /// 3. all players should play with as many other players as possible
     /// 4. a player should never be assigned to a date where they cannot play
-    fn fitness(planning: &PlanningData, assignment: &Assignment) -> ga::Fitness {
+    fn fitness(
+        planning: &PlanningData, past_matches: &[MatchPair], assignment: &Assignment
+    ) -> ga::Fitness {
         let player_count = planning.players().len();
-        let match_count = assignment.match_parings.len();
+        let all_matches: Vec<_> = past_matches.iter().chain(assignment.match_parings.iter()).collect();
+        let match_count = all_matches.len();
 
         // Note: when match_count * 2 is evenly divisble by player count,
         // min_expected_matches == max_expected_matches
@@ -306,18 +356,21 @@ impl<R: rand::Rng> Planner<R> {
         // availability
         let mut unavailability_penalty = 0;
 
-        for (day, pair) in assignment.match_parings.iter().enumerate() {
+        for (day, pair) in all_matches.iter().enumerate() {
             counts[pair.left.0] += 1;
             counts[pair.right.0] += 1;
 
             variety_matrix[matrix_index(pair)] += 1;
             variety_matrix[matrix_index_flip(pair)] += 1;
 
-            if ! planning.players()[pair.left.0].availability()[day] {
-                unavailability_penalty += 1;
-            }
-            if ! planning.players()[pair.right.0].availability()[day] {
-                unavailability_penalty += 1;
+            if day >= past_matches.len() {
+                let new_day = day - past_matches.len();
+                if ! planning.players()[pair.left.0].availability()[new_day] {
+                    unavailability_penalty += 1;
+                }
+                if ! planning.players()[pair.right.0].availability()[new_day] {
+                    unavailability_penalty += 1;
+                }
             }
         }
 
@@ -346,7 +399,7 @@ impl<R: rand::Rng> Planner<R> {
         for player_num in 0..player_count {
             let player = PlayerId(player_num);
             let mut last_match = 0;
-            for (day, pair) in assignment.match_parings.iter().enumerate() {
+            for (day, pair) in all_matches.iter().enumerate() {
                 if pair.involves(player) {
                     match_distances.push((day - last_match + 1) as f64);
                     last_match = day + 1;
@@ -375,7 +428,7 @@ impl<R: rand::Rng> Planner<R> {
             .sum::<usize>();
 
         let weighted_score =
-            inequality_penalty      as f64 * -6.0 +
+            inequality_penalty      as f64 * -10.0 +
             unavailability_penalty  as f64 * -10.0 +
             equidistance_penalty           * -1.0 +
             variety_penalty         as f64 * -3.0;
