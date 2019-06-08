@@ -290,6 +290,11 @@ impl<R: rand::Rng> Planner<R> {
         let player_count = planning.players().len();
         let match_count = assignment.match_parings.len();
 
+        // Note: when match_count * 2 is evenly divisble by player count,
+        // min_expected_matches == max_expected_matches
+        let min_expected_matches = match_count * 2 / player_count;
+        let max_expected_matches = (match_count * 2 + player_count - 1) / player_count;
+
         // equal number of plays
         let mut counts: Vec<usize> = vec![0; player_count];
 
@@ -340,10 +345,17 @@ impl<R: rand::Rng> Planner<R> {
             .map(|deviation| deviation * deviation)
             .sum::<f64>();
 
-        let inequality_penalty = match counts.into_iter().minmax() {
-            MinMaxResult::MinMax(min, max) => max - min,
-            _ => 0,
-        };
+        let inequality_penalty = counts.into_iter()
+            // Compute how far away a player is from the expected number of matches
+            // everyone should play
+            .map(|count| if count < min_expected_matches {
+                min_expected_matches - count
+            } else if count > max_expected_matches {
+                count - max_expected_matches
+            } else {
+                0
+            })
+            .sum::<usize>();
 
         let weighted_score =
             inequality_penalty         as f64 * -6.0 +
