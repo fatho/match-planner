@@ -299,7 +299,7 @@ impl<R: rand::Rng> Planner<R> {
         let mut counts: Vec<usize> = vec![0; player_count];
 
         // variety of opponents
-        let mut variety_matrix = vec![false; player_count * player_count];
+        let mut variety_matrix = vec![0usize; player_count * player_count];
         let matrix_index = |pair: &MatchPair| player_count * pair.left.0 + pair.right.0;
         let matrix_index_flip = |pair: &MatchPair| player_count * pair.right.0 + pair.left.0;
 
@@ -310,8 +310,8 @@ impl<R: rand::Rng> Planner<R> {
             counts[pair.left.0] += 1;
             counts[pair.right.0] += 1;
 
-            variety_matrix[matrix_index(pair)] = true;
-            variety_matrix[matrix_index_flip(pair)] = true;
+            variety_matrix[matrix_index(pair)] += 1;
+            variety_matrix[matrix_index_flip(pair)] += 1;
 
             if ! planning.players()[pair.left.0].availability()[day] {
                 unavailability_penalty += 1;
@@ -321,8 +321,25 @@ impl<R: rand::Rng> Planner<R> {
             }
         }
 
-        let variety_score = variety_matrix.into_iter()
-            .filter(|played| *played).count();
+        let mut variety_penalty = 0;       
+
+        for i in 0..player_count {
+            // How many matches this player should have played at least/most with each opponent.
+            let num_opponents = player_count - 1;
+            let min_matches_per_opponent = counts[i] / num_opponents;
+            let max_matches_per_opponent = (counts[i] + num_opponents - 1) / num_opponents;
+
+            // Count if the number of matches against each opponent deviates from the expected values
+            variety_penalty += variety_matrix[i * player_count..(i+1) * player_count].iter()
+                .map(|count| if *count < min_matches_per_opponent {
+                    min_matches_per_opponent - count
+                } else if *count > max_matches_per_opponent {
+                    count - max_matches_per_opponent
+                } else {
+                    0
+                })
+                .sum::<usize>();
+        }
 
         // equidistant matches
         let mut match_distances: Vec<f64> = Vec::new();
@@ -358,10 +375,10 @@ impl<R: rand::Rng> Planner<R> {
             .sum::<usize>();
 
         let weighted_score =
-            inequality_penalty         as f64 * -6.0 +
-            unavailability_penalty     as f64 * -10.0 +
-            equidistance_penalty              * -1.0 +
-            variety_score              as f64 *  3.0;
+            inequality_penalty      as f64 * -6.0 +
+            unavailability_penalty  as f64 * -10.0 +
+            equidistance_penalty           * -1.0 +
+            variety_penalty         as f64 * -3.0;
 
         ga::Fitness::new(weighted_score)
     }
