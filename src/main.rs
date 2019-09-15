@@ -77,7 +77,7 @@ fn run() -> errors::Result<()> {
         Box::new(std::io::stderr())
     };
 
-    let mut past_matches = Vec::<MatchPair>::new();
+    let mut past_matches = Vec::<SingleMatchPair>::new();
 
     for previuos_file in opt.past.iter() {
         let mut reader = csv::ReaderBuilder::new()
@@ -101,7 +101,7 @@ fn run() -> errors::Result<()> {
                 .filter(|(_, column)| *column == "1")
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
-            
+
             if ones.len() != 2 {
                 return Err(errors::Error::InvalidTimetable {
                     file: previuos_file.clone(),
@@ -110,7 +110,7 @@ fn run() -> errors::Result<()> {
                 });
             }
 
-            past_matches.push(MatchPair::new(PlayerId(ones[0]), PlayerId(ones[1])));
+            past_matches.push(SingleMatchPair::new(PlayerId(ones[0]), PlayerId(ones[1])));
         }
     }
 
@@ -127,7 +127,7 @@ fn run() -> errors::Result<()> {
 
     writeln!(log_out, "Generation | Average quality | Best quality")?;
 
-    let mut print_stats = |planner: &Planner<_>| {
+    let mut print_stats = |planner: &Planner<_, SingleMatchPair>| {
         let fitness_sum = planner.population().iter().map(|ind| ind.fitness().raw()).sum::<f64>();
         let count = planner.population().len();
 
@@ -155,7 +155,7 @@ fn run() -> errors::Result<()> {
     Ok(())
 }
 
-fn print_solution<W: Write>(out: W, players: &[Player], assignment: &Assignment) -> errors::Result<()> {
+fn print_solution<W: Write, P: MatchPair>(out: W, players: &[Player], assignment: &Assignment<P>) -> errors::Result<()> {
     let mut writer = csv::WriterBuilder::new()
         .delimiter(b'\t')
         .from_writer(out);
@@ -166,7 +166,7 @@ fn print_solution<W: Write>(out: W, players: &[Player], assignment: &Assignment)
     // Rows, one for each match day. Contains a 1 in the columns of the two players playing on that day.
     for pair in assignment.match_parings.iter() {
         writer.write_record(players.iter().enumerate()
-            .map(|(index, _)| if pair.left.0 == index || pair.right.0 == index { "1" } else { "" })
+            .map(|(index, _)| if pair.involves(PlayerId(index)) { "1" } else { "" })
         )?;
     }
     Ok(())
@@ -174,18 +174,18 @@ fn print_solution<W: Write>(out: W, players: &[Player], assignment: &Assignment)
 
 
 #[derive(Debug)]
-pub struct Planner<R> {
+pub struct Planner<R, P> {
     rng: R,
     planning: PlanningData,
-    past_matches: Vec<MatchPair>,
+    past_matches: Vec<P>,
     population_size: usize,
-    population: Vec<ga::Individual<Assignment>>,
+    population: Vec<ga::Individual<Assignment<P>>>,
     generation: usize,
 }
 
-impl<R: rand::Rng> Planner<R> {
+impl<R: rand::Rng, P: MatchPair + Clone> Planner<R, P> {
     pub fn new(
-        mut rng: R, population_size: usize, planning: PlanningData, past_matches: Vec<MatchPair>
+        mut rng: R, population_size: usize, planning: PlanningData, past_matches: Vec<P>
     ) -> Self {
         assert!(population_size > 0);
 
@@ -251,7 +251,7 @@ impl<R: rand::Rng> Planner<R> {
         self.population.iter().any(|individual| individual.generation() == self.generation)
     }
 
-    pub fn best(&self) -> &ga::Individual<Assignment> {
+    pub fn best(&self) -> &ga::Individual<Assignment<P>> {
         self.population.iter()
             .max_by_key(|individual| individual.fitness())
             .expect("population is at least 1")
@@ -261,16 +261,16 @@ impl<R: rand::Rng> Planner<R> {
         self.generation
     }
 
-    pub fn population(&self) -> &[ga::Individual<Assignment>] {
+    pub fn population(&self) -> &[ga::Individual<Assignment<P>>] {
         self.population.as_slice()
     }
 
-    fn make_individual(&self, assignment: Assignment) -> ga::Individual<Assignment> {
+    fn make_individual(&self, assignment: Assignment<P>) -> ga::Individual<Assignment<P>> {
         let fitness = Self::fitness(&self.planning, self.past_matches.as_slice(), &assignment);
         ga::Individual::new(self.generation, assignment, fitness)
     }
 
-    fn generate_offspring(rng: &mut R, parent1: &Assignment, parent2: &Assignment) -> (Assignment, Assignment) {
+    fn generate_offspring(rng: &mut R, parent1: &Assignment<P>, parent2: &Assignment<P>) -> (Assignment<P>, Assignment<P>) {
         let pair_count = parent1.match_parings.len();
 
         let split_point = rng.gen_range(0, pair_count);
@@ -287,7 +287,7 @@ impl<R: rand::Rng> Planner<R> {
         (child1, child2)
     }
 
-    fn mutate(&mut self, assignment: &mut Assignment) {
+    fn mutate(&mut self, assignment: &mut Assignment<P>) {
         let match_count = assignment.match_parings.len();
 
         // Approximate exponential distribution of number of mutations
@@ -304,14 +304,7 @@ impl<R: rand::Rng> Planner<R> {
             // of improving the variety.
             let mutation_indexes = rand::seq::index::sample(&mut self.rng, match_count, num_mutations);
             for mut_idx in mutation_indexes.into_iter() {
-                let pairing = &mut assignment.match_parings[mut_idx];
-                let player1 = if self.rng.gen() { pairing.left } else { pairing.left };
-
-                let mut player2 = self.rng.gen_range(0, self.planning.players().len() - 1);
-                if player2 >= player1.0 {
-                    player2 += 1
-                };
-                *pairing = MatchPair::new(player1, PlayerId(player2));
+                assignment.match_parings[mut_idx].mutate(&mut self.rng, self.planning.players().len());
             }
         } else {
             // In the remaining 90% of cases, swap pairs instead.
@@ -334,7 +327,7 @@ impl<R: rand::Rng> Planner<R> {
     /// 3. all players should play with as many other players as possible
     /// 4. a player should never be assigned to a date where they cannot play
     fn fitness(
-        planning: &PlanningData, past_matches: &[MatchPair], assignment: &Assignment
+        planning: &PlanningData, past_matches: &[P], assignment: &Assignment<P>
     ) -> ga::Fitness {
         let player_count = planning.players().len();
         let all_matches: Vec<_> = past_matches.iter().chain(assignment.match_parings.iter()).collect();
@@ -350,31 +343,31 @@ impl<R: rand::Rng> Planner<R> {
 
         // variety of opponents
         let mut variety_matrix = vec![0usize; player_count * player_count];
-        let matrix_index = |pair: &MatchPair| player_count * pair.left.0 + pair.right.0;
-        let matrix_index_flip = |pair: &MatchPair| player_count * pair.right.0 + pair.left.0;
 
         // availability
         let mut unavailability_penalty = 0;
 
-        for (day, pair) in all_matches.iter().enumerate() {
-            counts[pair.left.0] += 1;
-            counts[pair.right.0] += 1;
+        for (day, pair) in assignment.match_parings.iter().enumerate() {
+            for player in pair.players() {
+                counts[player.0] += 1;
+            }
 
-            variety_matrix[matrix_index(pair)] += 1;
-            variety_matrix[matrix_index_flip(pair)] += 1;
+            for p1 in pair.players() {
+                for p2 in pair.players() {
+                    if p1 != p2 {
+                        let matrix_index = player_count * p1.0 + p2.0;
+                        variety_matrix[matrix_index] += 1;
+                    }
+                }
+            }
 
             if day >= past_matches.len() {
                 let new_day = day - past_matches.len();
-                if ! planning.players()[pair.left.0].availability()[new_day] {
-                    unavailability_penalty += 1;
-                }
-                if ! planning.players()[pair.right.0].availability()[new_day] {
-                    unavailability_penalty += 1;
-                }
+                unavailability_penalty += pair.players().iter().filter(|p| ! planning.players()[p.0].availability()[new_day] ).count();
             }
         }
 
-        let mut variety_penalty = 0;       
+        let mut variety_penalty = 0;
 
         for i in 0..player_count {
             // How many matches this player should have played at least/most with each opponent.
@@ -439,13 +432,13 @@ impl<R: rand::Rng> Planner<R> {
 
 
 #[derive(Debug)]
-pub struct Assignment {
-    match_parings: Vec<MatchPair>,
+pub struct Assignment<P> {
+    match_parings: Vec<P>,
 }
 
-impl Assignment {
+impl<P: MatchPair> Assignment<P> {
     pub fn random(rng: &mut impl rand::Rng, match_count: usize, player_count: usize) -> Self {
-        let assignment = std::iter::repeat_with(|| MatchPair::random(rng, player_count))
+        let assignment = std::iter::repeat_with(|| P::random(rng, player_count))
             .take(match_count)
             .collect();
 
@@ -459,18 +452,16 @@ impl Assignment {
 pub struct PlayerId(usize);
 
 #[derive(Debug, Clone)]
-pub struct MatchPair {
-    left: PlayerId,
-    right: PlayerId,
+pub struct SingleMatchPair {
+    players: [PlayerId; 2],
 }
 
-impl MatchPair {
+impl SingleMatchPair {
     /// Create a normalized pair where the lower
     pub fn new(left: PlayerId, right: PlayerId) -> Self {
         assert!(left != right, "two distinct players are required for a match");
-        MatchPair {
-            left: left.min(right),
-            right: left.max(right),
+        SingleMatchPair {
+            players: [left.min(right), left.max(right)]
         }
     }
 
@@ -483,10 +474,47 @@ impl MatchPair {
         if player2 >= player1 {
             player2 += 1;
         }
-        MatchPair::new(PlayerId(player1), PlayerId(player2))
+        SingleMatchPair::new(PlayerId(player1), PlayerId(player2))
+    }
+}
+
+pub trait MatchPair {
+    fn mutate<R: rand::Rng>(&mut self, rng: &mut R, num_players: usize);
+
+    fn random<R: rand::Rng>(rng: &mut R, player_count: usize) -> Self;
+
+    fn players(&self) -> &[PlayerId];
+
+    fn involves(&self, player: PlayerId) -> bool {
+        self.players().iter().any(|p| *p == player)
+    }
+}
+
+impl MatchPair for SingleMatchPair {
+    fn mutate<R: rand::Rng>(&mut self, rng: &mut R, num_players: usize) {
+        let player1 = if rng.gen() { self.players[0] } else { self.players[1] };
+
+        let mut player2 = rng.gen_range(0, num_players - 1);
+        if player2 >= player1.0 {
+            player2 += 1
+        };
+
+        *self = SingleMatchPair::new(player1, PlayerId(player2))
     }
 
-    pub fn involves(&self, player: PlayerId) -> bool {
-        self.left == player || self.right == player
+    fn players(&self) -> &[PlayerId] {
+        &self.players
+    }
+
+    fn random<R: rand::Rng>(rng: &mut R, player_count: usize) -> Self {
+        assert!(player_count > 1, "Must have more than one player for making a pair");
+
+        // Generate two disjoint players
+        let player1 = rng.gen_range(0, player_count);
+        let mut player2 = rng.gen_range(0, player_count - 1);
+        if player2 >= player1 {
+            player2 += 1;
+        }
+        SingleMatchPair::new(PlayerId(player1), PlayerId(player2))
     }
 }
