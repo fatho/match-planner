@@ -30,6 +30,10 @@ struct Opt {
     #[structopt(short = "p", long = "past", parse(from_os_str))]
     past: Vec<PathBuf>,
 
+    /// Plan double matches instead of singles.
+    #[structopt(short = "d", long = "double")]
+    double: bool,
+
     /// Quiet mode, do not print anything to stderr
     #[structopt(short = "q", long = "quiet")]
     quiet: bool,
@@ -49,7 +53,13 @@ impl Write for NullWrite {
 }
 
 fn main() -> ! {
-    match run() {
+    let opt = Opt::from_args();
+    let result = if opt.double {
+        run::<DoubleMatchPair>(opt)
+    } else {
+        run::<SingleMatchPair>(opt)
+    };
+    match result {
         Err(err) => {
             eprintln!("{}", err);
             std::process::exit(1)
@@ -60,9 +70,7 @@ fn main() -> ! {
     }
 }
 
-fn run() -> errors::Result<()> {
-    let opt = Opt::from_args();
-
+fn run<P: MatchPair + Clone>(opt: Opt) -> errors::Result<()> {
     let input = match opt.input {
         None => PlanningData::load(std::io::stdin())?,
         Some(file_name) => {
@@ -77,7 +85,7 @@ fn run() -> errors::Result<()> {
         Box::new(std::io::stderr())
     };
 
-    let mut past_matches = Vec::<SingleMatchPair>::new();
+    let mut past_matches = Vec::<P>::new();
 
     for previuos_file in opt.past.iter() {
         let mut reader = csv::ReaderBuilder::new()
@@ -99,18 +107,18 @@ fn run() -> errors::Result<()> {
             // find the ones in the row
             let ones = record?.iter().enumerate()
                 .filter(|(_, column)| *column == "1")
-                .map(|(index, _)| index)
+                .map(|(index, _)| PlayerId(index))
                 .collect::<Vec<_>>();
 
-            if ones.len() != 2 {
+            if let Some(match_pair) = P::new(&ones) {
+                past_matches.push(match_pair);
+            } else {
                 return Err(errors::Error::InvalidTimetable {
                     file: previuos_file.clone(),
                     line: record_num + 2,
                     error: errors::TimetableError::InvalidPlayerCount
                 });
             }
-
-            past_matches.push(SingleMatchPair::new(PlayerId(ones[0]), PlayerId(ones[1])));
         }
     }
 
@@ -127,7 +135,7 @@ fn run() -> errors::Result<()> {
 
     writeln!(log_out, "Generation | Average quality | Best quality")?;
 
-    let mut print_stats = |planner: &Planner<_, SingleMatchPair>| {
+    let mut print_stats = |planner: &Planner<_, _>| {
         let fitness_sum = planner.population().iter().map(|ind| ind.fitness().raw()).sum::<f64>();
         let count = planner.population().len();
 
@@ -308,7 +316,7 @@ impl<R: rand::Rng, P: MatchPair + Clone> Planner<R, P> {
             }
         } else {
             // In the remaining 90% of cases, swap pairs instead.
-            // The advantage of this mutation is that is preserves most of
+            // The advantage of this mutation is that is preserves most
             // fitness coponents. It only affects the availability scores
             // and equidistance scores.
             for _ in 0..num_mutations {
@@ -421,8 +429,8 @@ impl<R: rand::Rng, P: MatchPair + Clone> Planner<R, P> {
             .sum::<usize>();
 
         let weighted_score =
-            inequality_penalty      as f64 * -10.0 +
-            unavailability_penalty  as f64 * -10.0 +
+            inequality_penalty      as f64 * -10.0 * (P::player_count() - 1).pow(3) as f64 +
+            unavailability_penalty  as f64 * -10.0 * (P::player_count() - 1).pow(2) as f64 +
             equidistance_penalty           * -1.0 +
             variety_penalty         as f64 * -3.0;
 
@@ -451,39 +459,70 @@ impl<P: MatchPair> Assignment<P> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PlayerId(usize);
 
+fn sample_players<R: rand::Rng>(rng: &mut R, player_count: usize, sample_size: usize) -> Vec<PlayerId> {
+    assert!(player_count >= sample_size, "Must have at least as many players as the sample size");
+
+    // Generate four disjoint players
+    let mut players: Vec<PlayerId> = Vec::new();
+    for i in 0..sample_size {
+        let mut random_player = PlayerId(rng.gen_range(0, player_count - i));
+        let insertion_index = players.iter()
+            .enumerate()
+            .find_map(|(index, value)| {
+                if random_player.0 >= value.0 {
+                    random_player.0 += 1;
+                    None
+                } else {
+                    Some(index)
+                }
+            })
+            .unwrap_or(players.len());
+        players.insert(insertion_index, random_player);
+    }
+    players
+}
+
+fn replace_random_player<R: rand::Rng>(players: &mut [PlayerId], rng: &mut R, player_count: usize) {
+    let index = rng.gen_range(0, players.len());
+    players.copy_within(index + 1..players.len(), index);
+    let mut new_player = PlayerId(rng.gen_range(0, player_count - players.len() + 1));
+    let insertion_index = players[..players.len() - 1].iter()
+        .enumerate()
+        .find_map(|(index, value)| {
+            if new_player.0 >= value.0 {
+                new_player.0 += 1;
+                None
+            } else {
+                Some(index)
+            }
+        })
+        .unwrap_or(players.len() - 1);
+    //if insertion_index < players.len() - 1 {
+    players.copy_within(insertion_index..players.len() - 1, insertion_index + 1);
+    //}
+    players[insertion_index] = new_player;
+}
+
 #[derive(Debug, Clone)]
 pub struct SingleMatchPair {
     players: [PlayerId; 2],
 }
 
-impl SingleMatchPair {
-    /// Create a normalized pair where the lower
-    pub fn new(left: PlayerId, right: PlayerId) -> Self {
-        assert!(left != right, "two distinct players are required for a match");
-        SingleMatchPair {
-            players: [left.min(right), left.max(right)]
-        }
-    }
-
-    pub fn random(rng: &mut impl rand::Rng, player_count: usize) -> Self {
-        assert!(player_count > 1, "Must have more than one player for making a pair");
-
-        // Generate two disjoint players
-        let player1 = rng.gen_range(0, player_count);
-        let mut player2 = rng.gen_range(0, player_count - 1);
-        if player2 >= player1 {
-            player2 += 1;
-        }
-        SingleMatchPair::new(PlayerId(player1), PlayerId(player2))
-    }
+#[derive(Debug, Clone)]
+pub struct DoubleMatchPair {
+    players: [PlayerId; 4],
 }
 
 pub trait MatchPair {
+    fn new(players: &[PlayerId]) -> Option<Self> where Self: Sized;
+
     fn mutate<R: rand::Rng>(&mut self, rng: &mut R, num_players: usize);
 
     fn random<R: rand::Rng>(rng: &mut R, player_count: usize) -> Self;
 
     fn players(&self) -> &[PlayerId];
+
+    fn player_count() -> usize;
 
     fn involves(&self, player: PlayerId) -> bool {
         self.players().iter().any(|p| *p == player)
@@ -491,30 +530,74 @@ pub trait MatchPair {
 }
 
 impl MatchPair for SingleMatchPair {
-    fn mutate<R: rand::Rng>(&mut self, rng: &mut R, num_players: usize) {
-        let player1 = if rng.gen() { self.players[0] } else { self.players[1] };
+    /// Create a normalized pair where the lower
+    fn new(players: &[PlayerId]) -> Option<Self> {
+        if players.len() != 2 {
+            return None;
+        }
+        if players[0] == players[1] {
+            return None;
+        }
+        assert!(players[0] != players[1], "two distinct players are required for a match");
+        Some(SingleMatchPair {
+            players: [players[0].min(players[1]), players[0].max(players[1])]
+        })
+    }
 
-        let mut player2 = rng.gen_range(0, num_players - 1);
-        if player2 >= player1.0 {
-            player2 += 1
-        };
-
-        *self = SingleMatchPair::new(player1, PlayerId(player2))
+    fn mutate<R: rand::Rng>(&mut self, rng: &mut R, player_count: usize) {
+        replace_random_player(&mut self.players, rng, player_count);
     }
 
     fn players(&self) -> &[PlayerId] {
         &self.players
     }
 
-    fn random<R: rand::Rng>(rng: &mut R, player_count: usize) -> Self {
-        assert!(player_count > 1, "Must have more than one player for making a pair");
+    fn player_count() -> usize {
+        2
+    }
 
-        // Generate two disjoint players
-        let player1 = rng.gen_range(0, player_count);
-        let mut player2 = rng.gen_range(0, player_count - 1);
-        if player2 >= player1 {
-            player2 += 1;
+    fn random<R: rand::Rng>(rng: &mut R, player_count: usize) -> Self {
+        let players = sample_players(rng, player_count, 2);
+        SingleMatchPair::new(&players).unwrap()
+    }
+}
+
+impl MatchPair for DoubleMatchPair {
+    /// Create a normalized pair where the lower
+    fn new(players: &[PlayerId]) -> Option<Self> {
+        if players.len() != 4 {
+            return None;
         }
-        SingleMatchPair::new(PlayerId(player1), PlayerId(player2))
+        let mut players_arr = [PlayerId(0); 4];
+        players_arr.copy_from_slice(players);
+        players_arr.sort();
+
+        let all_unique = players_arr.iter()
+            .zip(players_arr.iter().skip(1))
+            .all(|(p1, p2)| p1 != p2);
+        if ! all_unique {
+            return None;
+        }
+
+        Some(DoubleMatchPair {
+            players: players_arr,
+        })
+    }
+
+    fn mutate<R: rand::Rng>(&mut self, rng: &mut R, player_count: usize) {
+        replace_random_player(&mut self.players, rng, player_count);
+    }
+
+    fn players(&self) -> &[PlayerId] {
+        &self.players
+    }
+
+    fn player_count() -> usize {
+        4
+    }
+
+    fn random<R: rand::Rng>(rng: &mut R, player_count: usize) -> Self {
+        let players = sample_players(rng, player_count, 4);
+        DoubleMatchPair::new(&players).unwrap()
     }
 }
