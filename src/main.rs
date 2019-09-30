@@ -8,6 +8,7 @@ use structopt::StructOpt;
 mod errors;
 mod input;
 mod ga;
+mod algo2;
 use input::{PlanningData, Player};
 
 /// The command line options that can be given to this application.
@@ -37,6 +38,10 @@ struct Opt {
     /// Quiet mode, do not print anything to stderr
     #[structopt(short = "q", long = "quiet")]
     quiet: bool,
+
+    /// Use alternative algorithm
+    #[structopt(long)]
+    algo2: bool,
 }
 
 /// Implements Write but doesn't write anything.
@@ -78,6 +83,35 @@ fn run<P: MatchPair + Clone>(opt: Opt) -> errors::Result<()> {
             PlanningData::load(file)?
         },
     };
+
+    if opt.algo2 {
+        let mut availability = ndarray::Array::from_elem((input.match_count(), input.players().len()), false);
+        for (player_index, player) in input.players().iter().enumerate() {
+            for (match_index, available) in player.availability().iter().enumerate() {
+                availability[(match_index, player_index)] = *available;
+            }
+        }
+        let mode = if opt.double { algo2::Mode::Double } else { algo2::Mode::Single };
+        let avail = algo2::AvailabilityTable::new(availability);
+        // let mut table = algo2::MatchTable::new(input.match_count(), input.players().len());
+
+        // let mut solution = algo2::multi_start_local_search(&avail, mode, 10000);
+        let mut solution = algo2::iterated_local_search(&avail, mode);
+
+        println!("{}", solution.to_debug_tsv());
+
+        println!("Energy: {}", algo2::energy_impl(&solution, &avail, mode, true));
+
+        let mut test = Vec::new();
+        algo2::neighbours(&solution, &avail, mode, &mut test);
+        for n in test {
+            n.apply(&mut solution);
+            println!("{}: {:?}", algo2::energy_impl(&solution, &avail, mode, false), n);
+            n.unapply(&mut solution);
+        }
+
+        return Ok(());
+    }
 
     let mut log_out: Box<dyn Write> = if opt.quiet {
         Box::new(NullWrite)
@@ -357,7 +391,9 @@ impl<R: rand::Rng, P: MatchPair + Clone> Planner<R, P> {
 
         for (day, pair) in assignment.match_parings.iter().enumerate() {
             for player in pair.players() {
-                counts[player.0] += 1;
+                if planning.players()[player.0].availability()[day] {
+                    counts[player.0] += 1;
+                }
             }
 
             for p1 in pair.players() {
@@ -585,7 +621,8 @@ impl MatchPair for DoubleMatchPair {
     }
 
     fn mutate<R: rand::Rng>(&mut self, rng: &mut R, player_count: usize) {
-        replace_random_player(&mut self.players, rng, player_count);
+        *self = Self::random(rng, player_count);
+         // replace_random_player(&mut self.players, rng, player_count);
     }
 
     fn players(&self) -> &[PlayerId] {
