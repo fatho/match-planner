@@ -25,9 +25,11 @@ impl MatchTable {
         }
     }
 
-    pub fn flip_playing(&mut self, match_index: Match, player_index: Player) {
-        let playing = self.is_playing(match_index, player_index);
-        self.set_playing(match_index, player_index, ! playing);
+    pub fn from_table(playing: Array2<bool>) -> MatchTable {
+        let players_per_match = playing.fold_axis(ndarray::Axis(1), 0, |count, elem| count + (*elem as usize));
+        let matches_per_player = playing.fold_axis(ndarray::Axis(0), 0, |count, elem| count + (*elem as usize));
+
+        Self { playing, players_per_match, matches_per_player }
     }
 
     pub fn set_playing(&mut self, match_index: Match, player_index: Player, playing: bool) {
@@ -370,7 +372,12 @@ pub fn energy_impl(table: &MatchTable, availability: &AvailabilityTable, mode: M
                         (Some(match_index), total_deviation + deviation)
                     } else {
                         // Skip matches that are not played
-                        (last_match, total_deviation)
+                        if availability.is_available(Match(match_index), player_index) {
+                            (last_match, total_deviation)
+                        } else {
+                            // If someone is not available, pretend that day didn't happen
+                            (last_match.map(|x| x + 1), total_deviation)
+                        }
                     }
                 })
                 .1

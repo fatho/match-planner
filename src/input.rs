@@ -67,10 +67,6 @@ impl PlanningData {
         })
     }
 
-    pub fn player_index_by_name(&self, name: &str) -> Option<usize> {
-        self.players.iter().position(|player| player.name() == name)
-    }
-
     pub fn players(&self) -> &[Player] {
         self.players.as_slice()
     }
