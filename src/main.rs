@@ -6,7 +6,7 @@ use structopt::StructOpt;
 // submodules
 mod errors;
 mod input;
-mod algo2;
+mod local_search;
 use input::{PlanningData, Player};
 
 /// The command line options that can be given to this application.
@@ -29,9 +29,9 @@ struct Opt {
     #[structopt(short = "p", long = "past", parse(from_os_str))]
     past: Vec<PathBuf>,
 
-    /// Plan double matches instead of singles.
-    #[structopt(short = "d", long = "double")]
-    double: bool,
+    /// Whether to plan double or single matches.
+    #[structopt(short, long)]
+    mode: local_search::Mode,
 
     /// Quiet mode, do not print anything to stderr
     #[structopt(short = "q", long = "quiet")]
@@ -82,7 +82,7 @@ fn run(opt: Opt) -> errors::Result<()> {
 
     // Setup planning constraints
     let availability = make_availability_table(&input);
-    let mode = if opt.double { algo2::Mode::Double } else { algo2::Mode::Single };
+    let mode = opt.mode;
     let past_match_table = load_past_matches(opt.past.iter(), mode, &input.players())?;
 
     writeln!(log_out, "Number of players: {}", input.players().len())?;
@@ -90,7 +90,7 @@ fn run(opt: Opt) -> errors::Result<()> {
     writeln!(log_out, "Number of past matches: {}", past_match_table.match_count())?;
     writeln!(log_out, "--------------------------------------------------")?;
 
-    let solution = algo2::iterated_local_search(&availability, mode);
+    let solution = local_search::iterated_local_search(&past_match_table, &availability, mode);
 
     match opt.output {
         None => print_solution(std::io::stdout(), input.players(), &solution)?,
@@ -103,13 +103,13 @@ fn run(opt: Opt) -> errors::Result<()> {
     Ok(())
 }
 
-fn load_past_matches<P: AsRef<Path>, I: Iterator<Item=P>>(previous_match_files: I, mode: algo2::Mode, players: &[Player]) -> errors::Result<algo2::MatchTable> {
+fn load_past_matches<P: AsRef<Path>, I: Iterator<Item=P>>(previous_match_files: I, mode: local_search::Mode, players: &[Player]) -> errors::Result<local_search::MatchTable> {
     let mut past_matches = Vec::new();
     for previous_file in previous_match_files {
         read_previous_file_into(previous_file.as_ref(), mode, players, &mut past_matches)?;
     }
     let table = if past_matches.is_empty() {
-        algo2::MatchTable::new(0, players.len())
+        local_search::MatchTable::new(0, players.len())
     } else {
         let past_match_table = {
             let views: Vec<_> = past_matches.iter().map(|row|
@@ -117,12 +117,12 @@ fn load_past_matches<P: AsRef<Path>, I: Iterator<Item=P>>(previous_match_files: 
                 ).collect();
             ndarray::stack(ndarray::Axis(0), &views).unwrap()
         };
-        algo2::MatchTable::from_table(past_match_table)
+        local_search::MatchTable::from_table(past_match_table)
     };
     Ok(table)
 }
 
-fn read_previous_file_into(filename: &Path, mode: algo2::Mode, players: &[Player], rows: &mut Vec<ndarray::Array1<bool>>) -> errors::Result<()> {
+fn read_previous_file_into(filename: &Path, mode: local_search::Mode, players: &[Player], rows: &mut Vec<ndarray::Array1<bool>>) -> errors::Result<()> {
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b'\t')
         .has_headers(true)
@@ -163,17 +163,17 @@ fn read_previous_file_into(filename: &Path, mode: algo2::Mode, players: &[Player
 }
 
 /// Build the availability table used for local search from the parsed inpput
-fn make_availability_table(input: &PlanningData) -> algo2::AvailabilityTable {
+fn make_availability_table(input: &PlanningData) -> local_search::AvailabilityTable {
     let mut availability = ndarray::Array::from_elem((input.match_count(), input.players().len()), false);
     for (player_index, player) in input.players().iter().enumerate() {
         for (match_index, available) in player.availability().iter().enumerate() {
             availability[(match_index, player_index)] = *available;
         }
     }
-    algo2::AvailabilityTable::new(availability)
+    local_search::AvailabilityTable::new(availability)
 }
 
-fn print_solution<W: Write>(out: W, players: &[Player], assignment: &algo2::MatchTable) -> errors::Result<()> {
+fn print_solution<W: Write>(out: W, players: &[Player], assignment: &local_search::MatchTable) -> errors::Result<()> {
     let mut writer = csv::WriterBuilder::new()
         .delimiter(b'\t')
         .from_writer(out);
@@ -182,9 +182,9 @@ fn print_solution<W: Write>(out: W, players: &[Player], assignment: &algo2::Matc
     writer.write_record(players.iter().map(|p| p.name()))?;
 
     // Rows, one for each match day. Contains a 1 in the columns of the two players playing on that day.
-    for match_index in (0..assignment.match_count()).map(algo2::Match) {
+    for match_index in (0..assignment.match_count()).map(local_search::Match) {
         writer.write_record(
-            (0..assignment.player_count()).map(algo2::Player)
+            (0..assignment.player_count()).map(local_search::Player)
                 .map(|player_index|
                     if assignment.is_playing(match_index, player_index) { "1" } else { "" }
                 )

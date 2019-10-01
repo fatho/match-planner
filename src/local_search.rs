@@ -50,6 +50,7 @@ impl MatchTable {
         self.playing[(match_index.0, player_index.0)]
     }
 
+    #[allow(unused)]
     pub fn players_per_match(&self, match_index: Match) -> usize {
         self.players_per_match[match_index.0]
     }
@@ -66,6 +67,7 @@ impl MatchTable {
         self.playing.dim().1
     }
 
+    #[allow(unused)]
     pub fn to_debug_tsv(&self) -> String {
         use std::fmt::Write;
 
@@ -120,6 +122,7 @@ impl AvailabilityTable {
         self.matches_per_player[player_index.0]
     }
 
+    #[allow(unused)]
     pub fn to_debug_tsv(&self) -> String {
         use std::fmt::Write;
 
@@ -153,10 +156,11 @@ pub struct Match(pub usize);
 
 /// Generate `num_starts` random solutions and then perform local search on each of those.
 /// Return the best solution that was found.
-pub fn multi_start_local_search(availability: &AvailabilityTable, mode: Mode, num_starts: usize) -> MatchTable {
+#[allow(unused)]
+pub fn multi_start_local_search(previous_matches: &MatchTable, availability: &AvailabilityTable, mode: Mode, num_starts: usize) -> MatchTable {
     iter::repeat_with(|| {
         let mut solution = random_solution(availability, mode);
-        let energy = local_search(&mut solution, availability, mode);
+        let energy = local_search(&mut solution, previous_matches, availability, mode);
         (energy, solution)
     })
     .take(num_starts)
@@ -167,12 +171,13 @@ pub fn multi_start_local_search(availability: &AvailabilityTable, mode: Mode, nu
 
 /// Start with a random solution and perform local search until stuck in a local optimum.
 /// Once a local optimum is reached, the solution is randomly perturbed and the search is retried.
-pub fn iterated_local_search(availability: &AvailabilityTable, mode: Mode) -> MatchTable {
+/// The previous matches are used for evaluating the quality of a solution.
+pub fn iterated_local_search(previous_matches: &MatchTable, availability: &AvailabilityTable, mode: Mode) -> MatchTable {
     let (match_count, player_count) = availability.availability.dim();
 
     let mut solution = random_solution(availability, mode);
 
-    let mut current_best = energy(&solution, availability, mode);
+    let mut current_best = energy(&solution, previous_matches, availability, mode);
     let mut best_solution = solution.clone();
 
     // The number of matches to perturb in the pertubation step
@@ -184,7 +189,7 @@ pub fn iterated_local_search(availability: &AvailabilityTable, mode: Mode) -> Ma
 
     loop {
         // Descend into local optimum
-        let new_energy = local_search(&mut solution, availability, mode);
+        let new_energy = local_search(&mut solution, previous_matches, availability, mode);
 
         if new_energy < current_best {
             // we found a better local optimum, reset perturbation size
@@ -245,8 +250,8 @@ pub fn random_solution(availability: &AvailabilityTable, mode: Mode) -> MatchTab
 
 /// Perform local search on the match table for finding a local optimum.
 /// Returns the energy of the solution that was found.
-pub fn local_search(table: &mut MatchTable, availability: &AvailabilityTable, mode: Mode) -> usize {
-    let mut current_best = energy(table, availability, mode);
+pub fn local_search(table: &mut MatchTable, previous_matches: &MatchTable, availability: &AvailabilityTable, mode: Mode) -> usize {
+    let mut current_best = energy(table, previous_matches, availability, mode);
 
     let mut neighbour_vec: Vec<Neighbour> = Vec::new();
 
@@ -258,7 +263,7 @@ pub fn local_search(table: &mut MatchTable, availability: &AvailabilityTable, mo
         let best_neighbour = neighbour_vec.drain(..)
             .map(|n| {
                 n.apply(table);
-                let new_energy = energy(table, availability, mode);
+                let new_energy = energy(table, previous_matches, availability, mode);
                 n.unapply(table);
                 (new_energy, n)
             })
@@ -279,10 +284,42 @@ pub fn local_search(table: &mut MatchTable, availability: &AvailabilityTable, mo
     }
 }
 
-pub fn energy(table: &MatchTable, availability: &AvailabilityTable, mode: Mode) -> usize {
-    energy_impl(table, availability, mode, false)
+/// Concatenate two match tables along the vertical axis (i.e. combining their matches).
+/// Used for evaluating the quality of a solution given some earlier matches.
+#[derive(Copy, Clone)]
+struct ConcatenatedMatchTable<'a> {
+    previous_matches: &'a MatchTable,
+    current_matches: &'a MatchTable,
 }
 
+impl<'a> ConcatenatedMatchTable<'a> {
+    fn dim(&self) -> (usize, usize) {
+        let (match_count1, player_count1) = self.previous_matches.playing.dim();
+        let (match_count2, player_count2) = self.current_matches.playing.dim();
+
+        assert_eq!(player_count1, player_count2);
+        (match_count1 + match_count2, player_count1)
+    }
+
+    /// Iterate over all rows (i.e. matches) in the given range.
+    fn iter_rows(&self, range: std::ops::Range<usize>) -> impl Iterator<Item=ndarray::ArrayView1<bool>> {
+        let (match_count1, _player_count1) = self.previous_matches.playing.dim();
+
+        range.map(move |row_index| if row_index < match_count1 {
+            self.previous_matches.playing.index_axis(ndarray::Axis(0), row_index)
+        } else {
+            self.current_matches.playing.index_axis(ndarray::Axis(0), row_index - match_count1)
+        })
+    }
+
+    pub fn matches_per_player(&self, player_index: Player) -> usize {
+        self.previous_matches.matches_per_player(player_index) + self.current_matches.matches_per_player(player_index)
+    }
+}
+
+pub fn energy(current_matches: &MatchTable, previous_matches: &MatchTable, availability: &AvailabilityTable, mode: Mode) -> usize {
+    energy_impl(ConcatenatedMatchTable { previous_matches, current_matches }, availability, mode, false)
+}
 
 /// Compute the "energy" of a valid state according to the following criteria:
 ///
@@ -291,21 +328,19 @@ pub fn energy(table: &MatchTable, availability: &AvailabilityTable, mode: Mode) 
 /// 3. all players should play an approximatly equal number of matches
 ///
 /// The higher the energy, the more "unstable" the state is. We want to reach a low-energy state.
-pub fn energy_impl(table: &MatchTable, availability: &AvailabilityTable, mode: Mode, debug: bool) -> usize {
-    let (match_count, player_count) = table.playing.dim();
+fn energy_impl(table: ConcatenatedMatchTable, availability: &AvailabilityTable, mode: Mode, debug: bool) -> usize {
+    let (match_count, player_count) = table.dim();
 
     // 2. all players should play with as many other players as possible
 
     // TODO: O(n^2) alert, optimize later
 
-    let duplicate_match_assignments: usize = (0..match_count - 1)
-        .map(|match1| {
-            let row1 = table.playing.index_axis(ndarray::Axis(0), match1);
+    let duplicate_match_assignments: usize = table.iter_rows(0..match_count - 1)
+        .enumerate()
+        .map(|(index1, row1)| {
             // count how many of the following rows (= matches) are equal to this row
-            (match1 + 1..match_count)
-                .map(|match2| {
-                    let row2 = table.playing.index_axis(ndarray::Axis(0), match2);
-
+            table.iter_rows(index1 + 1..match_count)
+                .map(|row2| {
                     if row1 == row2 { 1 } else { 0 }
                 })
                 .sum::<usize>()
@@ -346,13 +381,14 @@ pub fn energy_impl(table: &MatchTable, availability: &AvailabilityTable, mode: M
         .map(|player_index| {
             let num_matches = table.matches_per_player(player_index);
             // Given the number of times we expect the player to play, how many days should be between each match
-            let expected_interval = match_count * MATCH_DEVIATION_ACCURACY / num_matches;
+            let expected_interval = match_count * MATCH_DEVIATION_ACCURACY / (num_matches + 1);
 
             if debug {
                 println!("{}: {} {}", player_index.0, num_matches, expected_interval);
             }
 
-            table.playing.index_axis(ndarray::Axis(1), player_index.0)
+            // For the deviation we only look at the new matches, as the old once won't influence it
+            table.current_matches.playing.index_axis(ndarray::Axis(1), player_index.0)
                 .iter()
                 .enumerate()
                 .fold((None, 0), |(last_match, total_deviation), (match_index, playing_current)| {
@@ -463,7 +499,29 @@ impl Mode {
     }
 }
 
+impl std::str::FromStr for Mode {
+    type Err = ParseModeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "single" => Ok(Mode::Single),
+            "double" => Ok(Mode::Double),
+            _ => Err(ParseModeError),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ParseModeError;
+
+impl std::fmt::Display for ParseModeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Invalid mode value, must be `single` or `double`")
+    }
+}
+
 /// Select a uniformly chosen element from the items of the given iterator.
+#[allow(unused)]
 pub fn reservoir_sampling_single<R: rand::Rng, I: Iterator>(rng: &mut R, items: I) -> Option<I::Item> {
     let mut chosen: Option<I::Item> = None;
     for (index, item) in items.enumerate() {
