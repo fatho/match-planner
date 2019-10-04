@@ -160,11 +160,11 @@ pub struct Match(pub usize);
 pub fn multi_start_local_search(previous_matches: &MatchTable, availability: &AvailabilityTable, mode: Mode, num_starts: usize) -> MatchTable {
     iter::repeat_with(|| {
         let mut solution = random_solution(availability, mode);
-        let energy = local_search(&mut solution, previous_matches, availability, mode);
-        (energy, solution)
+        let score = local_search(&mut solution, previous_matches, availability, mode);
+        (score, solution)
     })
     .take(num_starts)
-    .min_by_key(|(energy, _solution)| *energy)
+    .min_by_key(|(score, _solution)| *score)
     .expect("num_starts must be greate than zero")
     .1
 }
@@ -177,7 +177,7 @@ pub fn iterated_local_search(previous_matches: &MatchTable, availability: &Avail
 
     let mut solution = random_solution(availability, mode);
 
-    let mut current_best = energy(&solution, previous_matches, availability, mode);
+    let mut current_best = score(&solution, previous_matches, availability, mode);
     let mut best_solution = solution.clone();
 
     // The number of matches to perturb in the pertubation step
@@ -189,11 +189,11 @@ pub fn iterated_local_search(previous_matches: &MatchTable, availability: &Avail
 
     loop {
         // Descend into local optimum
-        let new_energy = local_search(&mut solution, previous_matches, availability, mode);
+        let new_score = local_search(&mut solution, previous_matches, availability, mode);
 
-        if new_energy < current_best {
+        if new_score < current_best {
             // we found a better local optimum, reset perturbation size
-            current_best = new_energy;
+            current_best = new_score;
             best_solution = solution.clone();
             perturbation_size = 1;
         } else if perturbation_size > match_count {
@@ -249,11 +249,15 @@ pub fn random_solution(availability: &AvailabilityTable, mode: Mode) -> MatchTab
 
 
 /// Perform local search on the match table for finding a local optimum.
-/// Returns the energy of the solution that was found.
+/// Returns the score of the solution that was found.
 pub fn local_search(table: &mut MatchTable, previous_matches: &MatchTable, availability: &AvailabilityTable, mode: Mode) -> usize {
-    let mut current_best = energy(table, previous_matches, availability, mode);
+    use rand::RngCore;
+
+    let mut current_best = score(table, previous_matches, availability, mode);
 
     let mut neighbour_vec: Vec<Neighbour> = Vec::new();
+
+    let mut rng = rand::thread_rng();
 
     // This loop terminates because at every step we either decrease `current_best` or we stop the iteration.
     loop {
@@ -262,17 +266,17 @@ pub fn local_search(table: &mut MatchTable, previous_matches: &MatchTable, avail
 
         let best_neighbour = neighbour_vec.drain(..)
             .map(|n| {
-                n.apply(table);
-                let new_energy = energy(table, previous_matches, availability, mode);
-                n.unapply(table);
-                (new_energy, n)
+                let new_score = n.inspect(table, |table| score(table, previous_matches, availability, mode));
+                // whenever two solutions have the same score, pick one at random
+                let tie_breaker = rng.next_u64();
+                (new_score, tie_breaker, n)
             })
-            .min_by_key(|(energy, _n)| *energy);
+            .min_by_key(|(score, tie_breaker, _n)| (*score, *tie_breaker));
 
-        if let Some((new_energy, neighbour)) = best_neighbour {
-            if new_energy < current_best {
+        if let Some((new_score, _, neighbour)) = best_neighbour {
+            if new_score < current_best {
                 neighbour.apply(table);
-                current_best = new_energy;
+                current_best = new_score;
             } else {
                 // even the best move was worse than what we had
                 return current_best;
@@ -317,18 +321,18 @@ impl<'a> ConcatenatedMatchTable<'a> {
     }
 }
 
-pub fn energy(current_matches: &MatchTable, previous_matches: &MatchTable, availability: &AvailabilityTable, mode: Mode) -> usize {
-    energy_impl(ConcatenatedMatchTable { previous_matches, current_matches }, availability, mode, false)
-}
-
-/// Compute the "energy" of a valid state according to the following criteria:
+/// Compute the "score" of a valid state according to the following criteria:
 ///
 /// 1. all players should have approximately equal intervals between their matches
 /// 2. all players should play with as many other players as possible
 /// 3. all players should play an approximatly equal number of matches
 ///
-/// The higher the energy, the more "unstable" the state is. We want to reach a low-energy state.
-fn energy_impl(table: ConcatenatedMatchTable, availability: &AvailabilityTable, mode: Mode, debug: bool) -> usize {
+/// A lower score is better.
+pub fn score(current_matches: &MatchTable, previous_matches: &MatchTable, availability: &AvailabilityTable, mode: Mode) -> usize {
+    score_impl(ConcatenatedMatchTable { previous_matches, current_matches }, availability, mode)
+}
+
+fn score_impl(table: ConcatenatedMatchTable, availability: &AvailabilityTable, mode: Mode) -> usize {
     let (match_count, player_count) = table.dim();
 
     // 2. all players should play with as many other players as possible
@@ -357,7 +361,7 @@ fn energy_impl(table: ConcatenatedMatchTable, availability: &AvailabilityTable, 
             let actual = table.matches_per_player(player_index);
 
             if actual < available.min(expected_match_count) {
-                // Increase energy when the player plays fewer times than what we would expect on average
+                // Increase score when the player plays fewer times than what we would expect on average
                 // By squaring the distance from the average we make sure that we can move a player
                 // that is further away from the average closer to the average at the expense of
                 // a player that is already closer to the average.
@@ -382,10 +386,6 @@ fn energy_impl(table: ConcatenatedMatchTable, availability: &AvailabilityTable, 
             let num_matches = table.matches_per_player(player_index);
             // Given the number of times we expect the player to play, how many days should be between each match
             let expected_interval = match_count * MATCH_DEVIATION_ACCURACY / (num_matches + 1);
-
-            if debug {
-                println!("{}: {} {}", player_index.0, num_matches, expected_interval);
-            }
 
             // For the deviation we only look at the new matches, as the old once won't influence it
             table.current_matches.playing.index_axis(ndarray::Axis(1), player_index.0)
@@ -480,6 +480,14 @@ impl Neighbour {
     pub fn unapply(&self, table: &mut MatchTable) {
         table.set_playing(self.match_index, self.player_in, false);
         table.set_playing(self.match_index, self.player_out, true);
+    }
+
+    /// Apply the neighbour transition to the table, evaluate the callback and undo the change again.
+    pub fn inspect<R, F>(&self, table: &mut MatchTable, inner: F) -> R where F: FnOnce(&mut MatchTable) -> R {
+        self.apply(table);
+        let result = inner(table);
+        self.unapply(table);
+        result
     }
 }
 

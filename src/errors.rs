@@ -62,7 +62,7 @@ impl fmt::Display for TimetableError {
             TimetableError::PlayerMismatch =>
                 write!(f, "Players in time table do not match with players in planning data"),
             TimetableError::InvalidPlayerCount =>
-                write!(f, "Match doesn't have exactly two players"),
+                write!(f, "Match has too many players"),
         }
     }
 }
