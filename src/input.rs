@@ -42,7 +42,9 @@ impl PlanningData {
             .from_reader(stream);
 
         // Each column corresponds to a player, the column header is the players name.
-        let mut players: Vec<_> = reader.headers()?.iter()
+        let mut players: Vec<_> = reader
+            .headers()?
+            .iter()
             .map(|name| Player {
                 name: name.to_owned(),
                 availability: Vec::new(),
@@ -56,7 +58,9 @@ impl PlanningData {
         for record in reader.into_records() {
             for (player, availability) in players.iter_mut().zip(record?.iter()) {
                 // Player is available if there's no X in the column
-                player.availability.push(!(availability == "x" || availability == "X"));
+                player
+                    .availability
+                    .push(!(availability == "x" || availability == "X"));
             }
             match_count += 1;
         }

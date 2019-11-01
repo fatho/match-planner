@@ -11,7 +11,11 @@ pub enum Error {
     /// An error while reading or writing CSV.
     Csv(csv::Error),
     /// The timetable file is not valid.
-    InvalidTimetable { file: PathBuf, line: usize, error: TimetableError },
+    InvalidTimetable {
+        file: PathBuf,
+        line: usize,
+        error: TimetableError,
+    },
 }
 
 #[derive(Debug)]
@@ -39,8 +43,9 @@ impl fmt::Display for Error {
         match self {
             Error::Io(err) => err.fmt(f),
             Error::Csv(err) => err.fmt(f),
-            Error::InvalidTimetable { file, line, error } =>
-                write!(f, "{}:{}: {}", file.to_string_lossy(), line, error),
+            Error::InvalidTimetable { file, line, error } => {
+                write!(f, "{}:{}: {}", file.to_string_lossy(), line, error)
+            }
         }
     }
 }
@@ -50,19 +55,19 @@ impl std::error::Error for Error {
         match self {
             Error::Io(error) => Some(error),
             Error::Csv(error) => Some(error),
-            Error::InvalidTimetable {error, ..} => Some(error),
+            Error::InvalidTimetable { error, .. } => Some(error),
         }
     }
 }
 
-
 impl fmt::Display for TimetableError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            TimetableError::PlayerMismatch =>
-                write!(f, "Players in time table do not match with players in planning data"),
-            TimetableError::InvalidPlayerCount =>
-                write!(f, "Match has too many players"),
+            TimetableError::PlayerMismatch => write!(
+                f,
+                "Players in time table do not match with players in planning data"
+            ),
+            TimetableError::InvalidPlayerCount => write!(f, "Match has too many players"),
         }
     }
 }
