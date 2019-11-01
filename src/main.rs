@@ -11,12 +11,8 @@ use input::{PlanningData, Player};
 
 /// The command line options that can be given to this application.
 #[derive(Debug, StructOpt)]
-#[structopt(name = "match-lanner", about = "An evolutionary planning application for assigning players to matches.")]
+#[structopt(name = "match-planner", about = "A planning application for assigning players to matches.")]
 struct Opt {
-    /// Population size used for the evolutionary algorithm.
-    #[structopt(short = "n", long = "population", default_value = "100000")]
-    population_size: usize,
-
     /// Input file, stdin if not present
     #[structopt(short = "i", long = "input", parse(from_os_str))]
     input: Option<PathBuf>,
@@ -36,19 +32,6 @@ struct Opt {
     /// Quiet mode, do not print anything to stderr
     #[structopt(short = "q", long = "quiet")]
     quiet: bool,
-}
-
-/// Implements Write but doesn't write anything.
-struct NullWrite;
-
-impl Write for NullWrite {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 fn main() -> ! {
@@ -191,4 +174,18 @@ fn print_solution<W: Write>(out: W, players: &[Player], assignment: &local_searc
         )?;
     }
     Ok(())
+}
+
+
+/// Implements Write but doesn't write anything.
+struct NullWrite;
+
+impl Write for NullWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
