@@ -5,3 +5,6 @@
 flame.svg
 perf.data
 perf.data.old
+
+# Nix
+/nix-result

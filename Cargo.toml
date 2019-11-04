@@ -7,6 +7,6 @@ edition = "2018"
 [dependencies]
 rand = "0.7.2"
 itertools = "0.8.1"
-structopt = "0.3.3"
+structopt = "0.3.4"
 csv = "1.1.1"
 ndarray = "0.13.0"
