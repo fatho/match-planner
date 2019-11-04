@@ -6,10 +6,7 @@ edition = "2018"
 
 [dependencies]
 rand = "0.7.2"
-itertools = "0.8.0"
-structopt = "0.3.2"
+itertools = "0.8.1"
+structopt = "0.3.3"
 csv = "1.1.1"
 ndarray = "0.13.0"
-
-[profile.release]
-debug = true
